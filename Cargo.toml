@@ -11,7 +11,6 @@ futures-lite = "2"
 gtk4 = { version = "0.11", features = ["v4_10"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 ksni = { version = "0.3", features = ["blocking"] }
-nokhwa = { version = "0.10", default-features = false, features = ["input-v4l", "decoding"] }
 prost = "0.14"
 rqrr = "0.11"
 secret-service = { version = "5.2", default-features = false, features = ["rt-async-io-crypto-rust"] }
@@ -20,3 +19,4 @@ serde_json = "1"
 totp-rs = { version = "6", default-features = false, features = ["std", "otpauth", "serde", "qr"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+v4l = "0.14"

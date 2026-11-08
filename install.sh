@@ -7,7 +7,8 @@ cargo build --release --locked
 bin_dir="${HOME}/.local/bin"
 apps_dir="${HOME}/.local/share/applications"
 autostart_dir="${HOME}/.config/autostart"
-install -Dm755 target/release/simpletotp "${bin_dir}/simpletotp"
+install -Dm755 target/release/simpletotp "${bin_dir}/.simpletotp.new"
+mv -f "${bin_dir}/.simpletotp.new" "${bin_dir}/simpletotp"
 mkdir -p "${apps_dir}" "${autostart_dir}"
 
 cat > "${apps_dir}/io.github.dabatnot.simpletotp.desktop" <<EOF

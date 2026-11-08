@@ -1,6 +1,6 @@
 # SimpleTOTP
 
-Application Linux de bureau pour les codes TOTP. Cliquez sur un service dans le menu de notification pour copier son code courant. L'anneau et le nombre de secondes indiquent sa durée restante ; la copie est suspendue pendant les deux dernières secondes.
+Application Linux de bureau pour les codes TOTP. Cliquez sur un service dans le menu de notification pour copier son code courant. L'anneau et le nombre de secondes indiquent sa durée restante ; la copie est suspendue pendant les deux dernières secondes. Les favoris apparaissent d'abord, puis « Tous les codes » regroupe toute la liste, favoris compris, par pages de dix.
 
 ## Utilisation
 
@@ -10,16 +10,17 @@ Application Linux de bureau pour les codes TOTP. Cliquez sur un service dans le 
 - **QR** : affichez le QR d'un compte pour le scanner sur un téléphone.
 - **Réimporter sur le téléphone** : parcourez tous les comptes, scannez chaque QR avec le téléphone et vérifiez son apparition avant de passer au suivant. Cette action ne modifie aucun compte enregistré.
 - **QR groupés Google** : affichez les comptes par groupes de six au format de transfert de Google Authenticator. Scannez tous les QR dans l'ordre. Les comptes restent dans SimpleTOTP et aucune image n'est enregistrée sur le disque.
+- **Rechercher et choisir les favoris** : utilisez le champ de recherche dans la fenêtre ; cliquez sur ☆ pour ajouter un compte aux favoris ou sur ★ pour le retirer (dix favoris maximum).
 - Fermez la fenêtre pour laisser l'application dans la zone de notification ; choisissez **Quitter** dans son menu pour l'arrêter.
 
 Les comptes sont conservés dans le coffre de secrets de la session Linux via Secret Service. Le dépôt et le répertoire de l'application ne contiennent aucune clé. Un QR affiché ou une image d'import révèle toutefois la clé à quiconque peut le voir ou accéder au fichier.
 
 ## Installation sur Fedora
 
-GTK 4 et ses fichiers de développement sont nécessaires à la compilation. La session doit fournir Secret Service et une zone de notification compatible StatusNotifierItem (par exemple l'extension GNOME AppIndicator).
+GTK 4 et ses fichiers de développement sont nécessaires à la compilation. Sous Wayland, `wl-copy` fournit la copie depuis le menu de notification. La session doit fournir Secret Service et une zone de notification compatible StatusNotifierItem (par exemple l'extension GNOME AppIndicator).
 
 ```sh
-sudo dnf install gtk4-devel
+sudo dnf install gtk4-devel wl-clipboard
 ./install.sh
 ```
 

@@ -6,10 +6,16 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use gtk4 as gtk;
 use image::ImageEncoder;
-use ksni::{MenuItem, Tray, blocking::TrayMethods, menu::StandardItem};
+use ksni::{
+    MenuItem, Tray,
+    blocking::TrayMethods,
+    menu::{StandardItem, SubMenu},
+};
 use otp::{Account, ImportResult, ImportSession};
 use std::{
     cell::{Cell, RefCell},
+    io::Write,
+    process::{Command, Stdio},
     rc::Rc,
     sync::mpsc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -22,8 +28,16 @@ enum Action {
     Quit,
 }
 struct AppTray {
-    accounts: Vec<(Uuid, String, u64)>,
+    accounts: Vec<TrayAccount>,
     sender: mpsc::Sender<Action>,
+}
+
+#[derive(Clone)]
+struct TrayAccount {
+    id: Uuid,
+    label: String,
+    period: u64,
+    favorite: bool,
 }
 
 fn now_seconds() -> u64 {
@@ -75,6 +89,24 @@ fn freshness_icon(remaining: u64, period: u64) -> Vec<u8> {
     }
     png
 }
+
+impl AppTray {
+    fn account_item(&self, account: &TrayAccount, now: u64) -> MenuItem<Self> {
+        let id = account.id;
+        let tx = self.sender.clone();
+        let remaining = seconds_left(account.period, now);
+        StandardItem {
+            label: format!("{} · {remaining} s", account.label.replace('_', "__")),
+            enabled: remaining > 2,
+            icon_data: freshness_icon(remaining, account.period),
+            activate: Box::new(move |_| {
+                let _ = tx.send(Action::Copy(id));
+            }),
+            ..Default::default()
+        }
+        .into()
+    }
+}
 impl Tray for AppTray {
     const MENU_ON_ACTIVATE: bool = true;
     fn id(&self) -> String {
@@ -90,24 +122,13 @@ impl Tray for AppTray {
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let mut menu = Vec::new();
         let now = now_seconds();
-        for (id, label, period) in &self.accounts {
-            let id = *id;
-            let tx = self.sender.clone();
-            let remaining = seconds_left(*period, now);
-            menu.push(
-                StandardItem {
-                    label: format!("{} · {remaining} s", label.replace('_', "__")),
-                    enabled: remaining > 2,
-                    icon_data: freshness_icon(remaining, *period),
-                    activate: Box::new(move |_| {
-                        let _ = tx.send(Action::Copy(id));
-                    }),
-                    ..Default::default()
-                }
-                .into(),
-            );
+        for account in self.accounts.iter().filter(|a| a.favorite).take(10) {
+            menu.push(self.account_item(account, now));
         }
-        if menu.is_empty() {
+        if !menu.is_empty() {
+            menu.push(MenuItem::Separator);
+        }
+        if self.accounts.is_empty() {
             menu.push(
                 StandardItem {
                     label: "Aucun compte".into(),
@@ -116,6 +137,26 @@ impl Tray for AppTray {
                 }
                 .into(),
             );
+        } else {
+            for (index, page) in self.accounts.chunks(10).enumerate() {
+                let start = index * 10 + 1;
+                let end = start + page.len() - 1;
+                menu.push(
+                    SubMenu {
+                        label: if self.accounts.len() <= 10 {
+                            "Tous les codes".into()
+                        } else {
+                            format!("Tous les codes · {start}–{end}")
+                        },
+                        submenu: page
+                            .iter()
+                            .map(|account| self.account_item(account, now))
+                            .collect(),
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+            }
         }
         menu.push(MenuItem::Separator);
         let tx = self.sender.clone();
@@ -146,6 +187,7 @@ impl Tray for AppTray {
 
 struct Ui {
     window: gtk::ApplicationWindow,
+    search: gtk::SearchEntry,
     list: gtk::ListBox,
     status: gtk::Label,
     accounts: Vec<Account>,
@@ -163,20 +205,41 @@ fn refresh(ui: &State) {
         .borrow()
         .accounts
         .iter()
-        .map(|a| (a.id, a.label.clone(), a.totp.step()))
+        .map(|a| TrayAccount {
+            id: a.id,
+            label: a.label.clone(),
+            period: a.totp.step(),
+            favorite: a.favorite,
+        })
         .collect();
     {
         let state = ui.borrow();
+        let query = state.search.text().to_lowercase();
         while let Some(child) = state.list.first_child() {
             state.list.remove(&child);
         }
-        for (id, label, _) in &items {
+        let mut shown = 0;
+        for item in items
+            .iter()
+            .filter(|item| item.label.to_lowercase().contains(&query))
+        {
+            shown += 1;
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             row.set_margin_top(6);
             row.set_margin_bottom(6);
             row.set_margin_start(8);
             row.set_margin_end(8);
-            let title = gtk::Label::new(Some(label));
+            let favorite = gtk::Button::with_label(if item.favorite { "★" } else { "☆" });
+            favorite.set_tooltip_text(Some(if item.favorite {
+                "Retirer des favoris"
+            } else {
+                "Ajouter aux favoris"
+            }));
+            let target = ui.clone();
+            let id = item.id;
+            favorite.connect_clicked(move |_| toggle_favorite(&target, id));
+            row.append(&favorite);
+            let title = gtk::Label::new(Some(&item.label));
             title.set_xalign(0.0);
             title.set_hexpand(true);
             title.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -184,7 +247,7 @@ fn refresh(ui: &State) {
             for (text, action) in [("Copier", 0), ("QR", 1), ("Renommer", 2), ("Supprimer", 3)] {
                 let button = gtk::Button::with_label(text);
                 let ui = ui.clone();
-                let id = *id;
+                let id = item.id;
                 button.connect_clicked(move |_| match action {
                     0 => copy(&ui, id),
                     1 => show_qr(&ui, id),
@@ -195,10 +258,76 @@ fn refresh(ui: &State) {
             }
             state.list.append(&row);
         }
+        if shown == 0 {
+            state
+                .list
+                .append(&gtk::Label::new(Some(if query.is_empty() {
+                    "Aucun compte enregistré."
+                } else {
+                    "Aucun compte trouvé."
+                })));
+        }
     }
     if let Some(tray) = &ui.borrow().tray {
         tray.update(|tray| tray.accounts = items);
     }
+}
+
+fn toggle_favorite(ui: &State, id: Uuid) {
+    let state = ui.borrow();
+    let Some(account) = state.accounts.iter().find(|a| a.id == id) else {
+        return;
+    };
+    if !account.favorite && state.accounts.iter().filter(|a| a.favorite).count() >= 10 {
+        drop(state);
+        message(ui, "Dix favoris au maximum.");
+        return;
+    }
+    let mut updated = account.clone();
+    updated.favorite = !updated.favorite;
+    drop(state);
+    match store::save(&updated) {
+        Ok(()) => {
+            if let Some(account) = ui.borrow_mut().accounts.iter_mut().find(|a| a.id == id) {
+                *account = updated.clone();
+            }
+            refresh(ui);
+            message(
+                ui,
+                if updated.favorite {
+                    "Favori ajouté."
+                } else {
+                    "Favori retiré."
+                },
+            );
+        }
+        Err(err) => message(ui, format!("Enregistrement impossible : {err}")),
+    }
+}
+
+fn set_clipboard(code: &str) -> anyhow::Result<()> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        let mut child = Command::new("wl-copy")
+            .args(["--type", "text/plain;charset=utf-8"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let mut input = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Entrée du presse-papiers indisponible"))?;
+        input.write_all(code.as_bytes())?;
+        drop(input);
+        if !child.wait()?.success() {
+            anyhow::bail!("wl-copy a échoué");
+        }
+    } else {
+        let display = gdk::Display::default()
+            .ok_or_else(|| anyhow::anyhow!("Presse-papiers indisponible"))?;
+        display.clipboard().set_text(code);
+    }
+    Ok(())
 }
 
 fn copy(ui: &State, id: Uuid) {
@@ -211,9 +340,11 @@ fn copy(ui: &State, id: Uuid) {
         .and_then(|a| {
             (seconds_left(a.totp.step(), now) > 2).then(|| a.totp.generate(now).to_string())
         });
-    if let (Some(code), Some(display)) = (code, gdk::Display::default()) {
-        display.clipboard().set_text(&code);
-        message(ui, "Code copié.");
+    if let Some(code) = code {
+        match set_clipboard(&code) {
+            Ok(()) => message(ui, "Code copié."),
+            Err(err) => message(ui, format!("Copie impossible : {err}")),
+        }
     }
 }
 
@@ -626,6 +757,9 @@ fn build(app: &gtk::Application, hidden: bool, hold: gio::ApplicationHoldGuard) 
     transfers.append(&transfer_button);
     transfers.append(&google_button);
     root.append(&transfers);
+    let search = gtk::SearchEntry::new();
+    search.set_placeholder_text(Some("Rechercher un compte"));
+    root.append(&search);
     let list = gtk::ListBox::new();
     list.add_css_class("boxed-list");
     let scroll = gtk::ScrolledWindow::new();
@@ -648,7 +782,12 @@ fn build(app: &gtk::Application, hidden: bool, hold: gio::ApplicationHoldGuard) 
     let tray = AppTray {
         accounts: accounts
             .iter()
-            .map(|a| (a.id, a.label.clone(), a.totp.step()))
+            .map(|a| TrayAccount {
+                id: a.id,
+                label: a.label.clone(),
+                period: a.totp.step(),
+                favorite: a.favorite,
+            })
             .collect(),
         sender,
     };
@@ -661,6 +800,7 @@ fn build(app: &gtk::Application, hidden: bool, hold: gio::ApplicationHoldGuard) 
     };
     let ui = Rc::new(RefCell::new(Ui {
         window: window.clone(),
+        search: search.clone(),
         list,
         status,
         accounts,
@@ -678,6 +818,8 @@ fn build(app: &gtk::Application, hidden: bool, hold: gio::ApplicationHoldGuard) 
     transfer_button.connect_clicked(move |_| transfer_all(&target));
     let target = ui.clone();
     google_button.connect_clicked(move |_| export_google(&target));
+    let target = ui.clone();
+    search.connect_search_changed(move |_| refresh(&target));
     window.connect_close_request(|window| {
         window.set_visible(false);
         glib::Propagation::Stop
@@ -730,7 +872,10 @@ fn main() {
 
 #[cfg(test)]
 mod tray_tests {
-    use super::{freshness_icon, seconds_left};
+    use super::{Action, AppTray, TrayAccount, freshness_icon, seconds_left};
+    use ksni::{MenuItem, Tray};
+    use std::sync::mpsc;
+    use uuid::Uuid;
 
     #[test]
     fn countdown_and_ring_refresh_at_code_boundary() {
@@ -738,5 +883,41 @@ mod tray_tests {
         assert_eq!(seconds_left(30, 30), 30);
         let ring = image::load_from_memory(&freshness_icon(15, 30)).unwrap();
         assert_eq!((ring.width(), ring.height()), (32, 32));
+    }
+
+    #[test]
+    fn favorites_then_all_accounts_in_pages_of_ten() {
+        let (sender, receiver) = mpsc::channel();
+        let mut tray = AppTray {
+            accounts: (0..12)
+                .map(|index| TrayAccount {
+                    id: Uuid::from_u128(index),
+                    label: format!("Compte {index}"),
+                    period: 30,
+                    favorite: index < 11,
+                })
+                .collect(),
+            sender,
+        };
+        let menu = tray.menu();
+        assert!(
+            menu[..10]
+                .iter()
+                .all(|item| matches!(item, MenuItem::Standard(_)))
+        );
+        assert!(matches!(menu[10], MenuItem::Separator));
+        let MenuItem::SubMenu(first_page) = &menu[11] else {
+            panic!("missing first page");
+        };
+        let MenuItem::SubMenu(second_page) = &menu[12] else {
+            panic!("missing second page");
+        };
+        assert_eq!(first_page.submenu.len(), 10);
+        assert_eq!(second_page.submenu.len(), 2);
+        let MenuItem::Standard(first_account) = &first_page.submenu[0] else {
+            panic!("missing first account");
+        };
+        (first_account.activate)(&mut tray);
+        assert!(matches!(receiver.try_recv(), Ok(Action::Copy(id)) if id == Uuid::from_u128(0)));
     }
 }

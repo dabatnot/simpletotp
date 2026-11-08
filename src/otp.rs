@@ -15,6 +15,8 @@ pub struct Account {
     pub id: Uuid,
     pub label: String,
     pub totp: Totp,
+    #[serde(default)]
+    pub favorite: bool,
 }
 
 impl Account {
@@ -58,6 +60,7 @@ impl Account {
             id: Uuid::new_v4(),
             label,
             totp,
+            favorite: false,
         }
     }
 
@@ -342,6 +345,15 @@ mod tests {
         let stored: Account =
             serde_json::from_slice(&serde_json::to_vec(&account).unwrap()).unwrap();
         assert_eq!(stored.totp, account.totp);
+        let mut legacy = serde_json::to_value(&account).unwrap();
+        legacy.as_object_mut().unwrap().remove("favorite");
+        let legacy: Account = serde_json::from_value(legacy).unwrap();
+        assert!(!legacy.favorite);
+        let mut favorite = account.clone();
+        favorite.favorite = true;
+        let stored: Account =
+            serde_json::from_slice(&serde_json::to_vec(&favorite).unwrap()).unwrap();
+        assert!(stored.favorite);
     }
 
     #[test]

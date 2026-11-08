@@ -12,6 +12,7 @@ gtk4 = { version = "0.11", features = ["v4_10"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 ksni = { version = "0.3", features = ["blocking"] }
 prost = "0.14"
+qrcodegen-image = "1.5"
 rqrr = "0.11"
 secret-service = { version = "5.2", default-features = false, features = ["rt-async-io-crypto-rust"] }
 serde = { version = "1", features = ["derive"] }

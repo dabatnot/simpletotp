@@ -102,9 +102,32 @@ mod tests {
                 "QR mismatch at index {index}"
             );
         }
+        let images = crate::otp::google_export_qrs(&accounts).unwrap();
+        let mut session = crate::otp::ImportSession::default();
+        let mut restored = None;
+        for image in &images {
+            let values = crate::otp::read_qr_image(image).unwrap();
+            assert_eq!(values.len(), 1);
+            match session.ingest(&values[0]).unwrap() {
+                crate::otp::ImportResult::Pending(_, _) => {}
+                crate::otp::ImportResult::Ready(imported, skipped) => {
+                    assert_eq!(skipped, 0);
+                    restored = Some(imported);
+                }
+            }
+        }
+        let restored = restored.expect("grouped import incomplete");
+        assert_eq!(restored.len(), accounts.len());
+        assert!(
+            restored
+                .iter()
+                .zip(&accounts)
+                .all(|(a, b)| a.totp == b.totp)
+        );
         eprintln!(
-            "Verified {} saved QR codes without changing the keyring",
-            accounts.len()
+            "Verified {} saved accounts in {} grouped QR codes without changing the keyring",
+            accounts.len(),
+            images.len()
         );
     }
 }

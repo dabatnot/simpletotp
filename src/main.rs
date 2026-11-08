@@ -233,16 +233,14 @@ fn add(ui: &State) {
     window.present();
 }
 
-fn qr_texture(account: &Account) -> anyhow::Result<gdk::Texture> {
-    account.qr_png().and_then(|png| {
-        let loader = gtk::gdk_pixbuf::PixbufLoader::new();
-        loader.write(&png)?;
-        loader.close()?;
-        let pixbuf = loader
-            .pixbuf()
-            .ok_or_else(|| anyhow::anyhow!("Image QR illisible"))?;
-        Ok(gdk::Texture::for_pixbuf(&pixbuf))
-    })
+fn qr_texture(png: &[u8]) -> anyhow::Result<gdk::Texture> {
+    let loader = gtk::gdk_pixbuf::PixbufLoader::new();
+    loader.write(png)?;
+    loader.close()?;
+    let pixbuf = loader
+        .pixbuf()
+        .ok_or_else(|| anyhow::anyhow!("Image QR illisible"))?;
+    Ok(gdk::Texture::for_pixbuf(&pixbuf))
 }
 
 fn show_qr(ui: &State, id: Uuid) {
@@ -250,7 +248,7 @@ fn show_qr(ui: &State, id: Uuid) {
     let Some(account) = account else {
         return;
     };
-    match qr_texture(&account) {
+    match account.qr_png().and_then(|png| qr_texture(&png)) {
         Ok(texture) => {
             let parent = ui.borrow().window.clone();
             let window = gtk::Window::builder()
@@ -275,29 +273,28 @@ fn show_qr(ui: &State, id: Uuid) {
     }
 }
 
-fn transfer_all(ui: &State) {
-    let accounts = ui.borrow().accounts.clone();
-    if accounts.is_empty() {
-        message(ui, "Aucun compte à transférer.");
-        return;
-    }
+fn show_qr_series(
+    ui: &State,
+    title: &str,
+    instruction: &str,
+    pages: Vec<(String, Vec<u8>)>,
+    size: i32,
+) {
     let parent = ui.borrow().window.clone();
     let window = gtk::Window::builder()
-        .title("Réimporter sur le téléphone")
+        .title(title)
         .transient_for(&parent)
         .modal(true)
-        .default_width(420)
+        .default_width(size + 60)
         .build();
     let box_ = column();
     let progress = gtk::Label::new(None);
     progress.set_wrap(true);
     let picture = gtk::Picture::new();
-    picture.set_size_request(320, 320);
+    picture.set_size_request(size, size);
     picture.set_content_fit(gtk::ContentFit::Contain);
-    let instruction = gtk::Label::new(Some(
-        "Scannez ce QR avec votre téléphone. Vérifiez que le compte apparaît, puis passez au suivant.",
-    ));
-    instruction.set_wrap(true);
+    let instructions = gtk::Label::new(Some(instruction));
+    instructions.set_wrap(true);
     let error = gtk::Label::new(None);
     error.set_wrap(true);
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -309,7 +306,7 @@ fn transfer_all(ui: &State) {
     buttons.append(&close);
     box_.append(&progress);
     box_.append(&picture);
-    box_.append(&instruction);
+    box_.append(&instructions);
     box_.append(&error);
     box_.append(&buttons);
     window.set_child(Some(&box_));
@@ -321,12 +318,12 @@ fn transfer_all(ui: &State) {
         progress.set_text(&format!(
             "{} / {} · {}",
             index + 1,
-            accounts.len(),
-            accounts[index].label
+            pages.len(),
+            pages[index].0
         ));
         previous_for_render.set_sensitive(index > 0);
-        next_for_render.set_sensitive(index + 1 < accounts.len());
-        match qr_texture(&accounts[index]) {
+        next_for_render.set_sensitive(index + 1 < pages.len());
+        match qr_texture(&pages[index].1) {
             Ok(texture) => {
                 picture.set_paintable(Some(&texture));
                 error.set_text("");
@@ -354,6 +351,54 @@ fn transfer_all(ui: &State) {
     let dismiss = window.clone();
     close.connect_clicked(move |_| dismiss.close());
     window.present();
+}
+
+fn transfer_all(ui: &State) {
+    let accounts = ui.borrow().accounts.clone();
+    if accounts.is_empty() {
+        message(ui, "Aucun compte à transférer.");
+        return;
+    }
+    let pages = accounts
+        .iter()
+        .map(|account| account.qr_png().map(|png| (account.label.clone(), png)))
+        .collect::<anyhow::Result<Vec<_>>>();
+    match pages {
+        Ok(pages) => show_qr_series(
+            ui,
+            "Réimporter sur le téléphone",
+            "Scannez ce QR avec votre téléphone. Vérifiez que le compte apparaît, puis passez au suivant.",
+            pages,
+            320,
+        ),
+        Err(err) => message(ui, format!("QR indisponible : {err}")),
+    }
+}
+
+fn export_google(ui: &State) {
+    let accounts = ui.borrow().accounts.clone();
+    let images = otp::google_export_qrs(&accounts);
+    match images {
+        Ok(images) => {
+            let pages = images
+                .into_iter()
+                .enumerate()
+                .map(|(index, png)| {
+                    let first = index * otp::GOOGLE_BATCH_LIMIT + 1;
+                    let last = (first + otp::GOOGLE_BATCH_LIMIT - 1).min(accounts.len());
+                    (format!("Comptes {first} à {last}"), png)
+                })
+                .collect();
+            show_qr_series(
+                ui,
+                "QR groupés Google Authenticator",
+                "Scannez les QR dans l’ordre avec l’import de Google Authenticator. Si ces comptes sont déjà sur le téléphone, l’import peut créer des doublons.",
+                pages,
+                560,
+            );
+        }
+        Err(err) => message(ui, format!("Export groupé impossible : {err}")),
+    }
 }
 
 fn rename(ui: &State, id: Uuid) {
@@ -513,11 +558,15 @@ fn build(app: &gtk::Application, hidden: bool, hold: gio::ApplicationHoldGuard) 
     let image_button = gtk::Button::with_label("Importer une image");
     let camera_button = gtk::Button::with_label("Scanner avec la caméra");
     let transfer_button = gtk::Button::with_label("Réimporter sur le téléphone");
+    let google_button = gtk::Button::with_label("QR groupés Google");
     actions.append(&add_button);
     actions.append(&image_button);
     actions.append(&camera_button);
-    actions.append(&transfer_button);
     root.append(&actions);
+    let transfers = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    transfers.append(&transfer_button);
+    transfers.append(&google_button);
+    root.append(&transfers);
     let list = gtk::ListBox::new();
     list.add_css_class("boxed-list");
     let scroll = gtk::ScrolledWindow::new();
@@ -565,6 +614,8 @@ fn build(app: &gtk::Application, hidden: bool, hold: gio::ApplicationHoldGuard) 
     camera_button.connect_clicked(move |_| camera::scan(&target, import_text, message));
     let target = ui.clone();
     transfer_button.connect_clicked(move |_| transfer_all(&target));
+    let target = ui.clone();
+    google_button.connect_clicked(move |_| export_google(&target));
     window.connect_close_request(|window| {
         window.set_visible(false);
         glib::Propagation::Stop

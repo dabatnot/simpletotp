@@ -1883,6 +1883,7 @@ dependencies = [
  "image",
  "ksni",
  "prost",
+ "qrcodegen-image",
  "rqrr",
  "secret-service",
  "serde",

@@ -99,6 +99,62 @@ struct MigrationAccount {
     kind: i32,
 }
 
+pub const GOOGLE_BATCH_LIMIT: usize = 6;
+
+pub fn google_export_qrs(accounts: &[Account]) -> Result<Vec<Vec<u8>>> {
+    if accounts.is_empty() || accounts.len() > 100 * GOOGLE_BATCH_LIMIT {
+        bail!("Nombre de comptes incompatible avec l'export groupé.");
+    }
+    let batch_size = accounts.len().div_ceil(GOOGLE_BATCH_LIMIT) as i32;
+    let id = Uuid::new_v4();
+    let batch_id = i32::from_be_bytes(id.as_bytes()[..4].try_into().unwrap()) & i32::MAX;
+    accounts
+        .chunks(GOOGLE_BATCH_LIMIT)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let entries = chunk
+                .iter()
+                .map(|account| {
+                    let totp = &account.totp;
+                    if totp.step() != 30 {
+                        bail!("Un compte utilise une durée incompatible avec l'export groupé.");
+                    }
+                    let algorithm = match totp.algorithm() {
+                        Algorithm::SHA1 => 1,
+                        Algorithm::SHA256 => 2,
+                        Algorithm::SHA512 => 3,
+                        _ => bail!("Un compte utilise un algorithme incompatible avec l'export groupé."),
+                    };
+                    let digits = match totp.digits() {
+                        6 => 1,
+                        8 => 2,
+                        _ => bail!("Un compte utilise un nombre de chiffres incompatible avec l'export groupé."),
+                    };
+                    Ok(MigrationAccount {
+                        secret: totp.secret().as_bytes().to_vec(),
+                        name: totp.account_name().to_owned(),
+                        issuer: totp.issuer().unwrap_or_default().to_owned(),
+                        algorithm,
+                        digits,
+                        kind: 2,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let payload = MigrationPayload {
+                accounts: entries,
+                version: 1,
+                batch_size,
+                batch_index: index as i32,
+                batch_id,
+            };
+            let data = STANDARD.encode(payload.encode_to_vec());
+            let encoded: String = url::form_urlencoded::byte_serialize(data.as_bytes()).collect();
+            qrcodegen_image::draw_png(&format!("otpauth-migration://offline?data={encoded}"))
+                .map_err(|_| anyhow::anyhow!("QR groupé trop chargé pour être affiché."))
+        })
+        .collect()
+}
+
 pub enum ImportResult {
     Pending(usize, usize),
     Ready(Vec<Account>, usize),
@@ -289,5 +345,49 @@ mod tests {
         let stored: Account =
             serde_json::from_slice(&serde_json::to_vec(&account).unwrap()).unwrap();
         assert_eq!(stored.totp, account.totp);
+    }
+
+    #[test]
+    fn grouped_google_qrs_round_trip() {
+        let mut accounts = (0..6)
+            .map(|index| {
+                Account::from_key(
+                    "Example",
+                    &format!("user{index}"),
+                    "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        accounts.push(Account::new(
+            Builder::new()
+                .with_secret(b"12345678901234567890123456789012".to_vec())
+                .with_algorithm(Algorithm::SHA256)
+                .with_digits(8)
+                .with_issuer(Some("Example"))
+                .with_account_name("eighth")
+                .build()
+                .unwrap(),
+        ));
+        let images = google_export_qrs(&accounts).unwrap();
+        assert_eq!(images.len(), 2);
+        let mut session = ImportSession::default();
+        for (index, image) in images.iter().enumerate() {
+            let values = read_qr_image(image).unwrap();
+            assert_eq!(values.len(), 1);
+            match session.ingest(&values[0]).unwrap() {
+                ImportResult::Pending(1, 2) if index == 0 => {}
+                ImportResult::Ready(imported, 0) if index == 1 => {
+                    assert_eq!(imported.len(), accounts.len());
+                    assert!(
+                        imported
+                            .iter()
+                            .zip(&accounts)
+                            .all(|(a, b)| a.totp == b.totp)
+                    );
+                }
+                _ => panic!("unexpected grouped import result"),
+            }
+        }
     }
 }

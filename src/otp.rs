@@ -61,9 +61,6 @@ impl Account {
         }
     }
 
-    pub fn code(&self) -> String {
-        self.totp.generate_current().to_string()
-    }
     pub fn qr_png(&self) -> Result<Vec<u8>> {
         self.totp.to_qr_png().map_err(|e| anyhow::anyhow!(e))
     }

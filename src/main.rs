@@ -5,13 +5,14 @@ mod store;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use gtk4 as gtk;
+use image::ImageEncoder;
 use ksni::{MenuItem, Tray, blocking::TrayMethods, menu::StandardItem};
 use otp::{Account, ImportResult, ImportSession};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
     sync::mpsc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
@@ -21,8 +22,58 @@ enum Action {
     Quit,
 }
 struct AppTray {
-    accounts: Vec<(Uuid, String)>,
+    accounts: Vec<(Uuid, String, u64)>,
     sender: mpsc::Sender<Action>,
+}
+
+fn now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn seconds_left(period: u64, now: u64) -> u64 {
+    let period = period.max(1);
+    period - now % period
+}
+
+fn freshness_icon(remaining: u64, period: u64) -> Vec<u8> {
+    let mut image = image::RgbaImage::new(32, 32);
+    let progress = remaining as f64 / period.max(1) as f64;
+    let active = if remaining <= 5 {
+        [220, 75, 65, 255]
+    } else if remaining <= 10 {
+        [225, 165, 55, 255]
+    } else {
+        [65, 170, 90, 255]
+    };
+    for y in 0..32 {
+        for x in 0..32 {
+            let dx = x as f64 - 15.5;
+            let dy = y as f64 - 15.5;
+            let radius = (dx * dx + dy * dy).sqrt();
+            if (9.0..=13.0).contains(&radius) {
+                let angle =
+                    (dy.atan2(dx) + std::f64::consts::FRAC_PI_2).rem_euclid(std::f64::consts::TAU);
+                let color = if angle / std::f64::consts::TAU < progress {
+                    active
+                } else {
+                    [130, 130, 130, 120]
+                };
+                image.put_pixel(x, y, image::Rgba(color));
+            }
+        }
+    }
+    let mut png = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut png);
+    if encoder
+        .write_image(image.as_raw(), 32, 32, image::ExtendedColorType::Rgba8)
+        .is_err()
+    {
+        return Vec::new();
+    }
+    png
 }
 impl Tray for AppTray {
     const MENU_ON_ACTIVATE: bool = true;
@@ -35,14 +86,19 @@ impl Tray for AppTray {
     fn icon_name(&self) -> String {
         "dialog-password-symbolic".into()
     }
+    fn menu_about_to_show(&mut self) {}
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let mut menu = Vec::new();
-        for (id, label) in &self.accounts {
+        let now = now_seconds();
+        for (id, label, period) in &self.accounts {
             let id = *id;
             let tx = self.sender.clone();
+            let remaining = seconds_left(*period, now);
             menu.push(
                 StandardItem {
-                    label: label.replace('_', "__"),
+                    label: format!("{} · {remaining} s", label.replace('_', "__")),
+                    enabled: remaining > 2,
+                    icon_data: freshness_icon(remaining, *period),
                     activate: Box::new(move |_| {
                         let _ = tx.send(Action::Copy(id));
                     }),
@@ -107,14 +163,14 @@ fn refresh(ui: &State) {
         .borrow()
         .accounts
         .iter()
-        .map(|a| (a.id, a.label.clone()))
+        .map(|a| (a.id, a.label.clone(), a.totp.step()))
         .collect();
     {
         let state = ui.borrow();
         while let Some(child) = state.list.first_child() {
             state.list.remove(&child);
         }
-        for (id, label) in &items {
+        for (id, label, _) in &items {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             row.set_margin_top(6);
             row.set_margin_bottom(6);
@@ -146,12 +202,15 @@ fn refresh(ui: &State) {
 }
 
 fn copy(ui: &State, id: Uuid) {
+    let now = now_seconds();
     let code = ui
         .borrow()
         .accounts
         .iter()
         .find(|a| a.id == id)
-        .map(Account::code);
+        .and_then(|a| {
+            (seconds_left(a.totp.step(), now) > 2).then(|| a.totp.generate(now).to_string())
+        });
     if let (Some(code), Some(display)) = (code, gdk::Display::default()) {
         display.clipboard().set_text(&code);
         message(ui, "Code copié.");
@@ -587,7 +646,10 @@ fn build(app: &gtk::Application, hidden: bool, hold: gio::ApplicationHoldGuard) 
     };
     let (sender, receiver) = mpsc::channel();
     let tray = AppTray {
-        accounts: accounts.iter().map(|a| (a.id, a.label.clone())).collect(),
+        accounts: accounts
+            .iter()
+            .map(|a| (a.id, a.label.clone(), a.totp.step()))
+            .collect(),
         sender,
     };
     let tray = match tray.spawn() {
@@ -635,6 +697,13 @@ fn build(app: &gtk::Application, hidden: bool, hold: gio::ApplicationHoldGuard) 
         }
         glib::ControlFlow::Continue
     });
+    let target = ui.clone();
+    glib::timeout_add_local(Duration::from_secs(1), move || {
+        if let Some(tray) = &target.borrow().tray {
+            tray.update(|_| {});
+        }
+        glib::ControlFlow::Continue
+    });
     refresh(&ui);
     if !hidden || ui.borrow().tray.is_none() {
         window.present();
@@ -657,4 +726,17 @@ fn main() {
         *state.borrow_mut() = Some(build(app, hidden, hold));
     });
     app.run();
+}
+
+#[cfg(test)]
+mod tray_tests {
+    use super::{freshness_icon, seconds_left};
+
+    #[test]
+    fn countdown_and_ring_refresh_at_code_boundary() {
+        assert_eq!(seconds_left(30, 29), 1);
+        assert_eq!(seconds_left(30, 30), 30);
+        let ring = image::load_from_memory(&freshness_icon(15, 30)).unwrap();
+        assert_eq!((ring.width(), ring.height()), (32, 32));
+    }
 }

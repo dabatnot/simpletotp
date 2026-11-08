@@ -1,6 +1,6 @@
 # SimpleTOTP
 
-Application Linux de bureau pour les codes TOTP. Cliquez sur un service dans le menu de notification pour copier son code courant.
+Application Linux de bureau pour les codes TOTP. Cliquez sur un service dans le menu de notification pour copier son code courant. L'anneau et le nombre de secondes indiquent sa durée restante ; la copie est suspendue pendant les deux dernières secondes.
 
 ## Utilisation
 

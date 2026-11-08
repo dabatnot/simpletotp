@@ -87,4 +87,24 @@ mod tests {
         assert!(found);
         assert!(!load().unwrap().iter().any(|saved| saved.id == account.id));
     }
+
+    #[test]
+    #[ignore = "needs a desktop Secret Service session"]
+    fn live_saved_qrs_round_trip_without_changes() {
+        let accounts = load().unwrap();
+        assert!(!accounts.is_empty(), "no saved accounts found");
+        for (index, account) in accounts.iter().enumerate() {
+            let values = crate::otp::read_qr_image(&account.qr_png().unwrap()).unwrap();
+            assert_eq!(values.len(), 1, "unexpected QR count at index {index}");
+            let imported = Account::from_url(&values[0]).unwrap();
+            assert!(
+                imported.totp == account.totp,
+                "QR mismatch at index {index}"
+            );
+        }
+        eprintln!(
+            "Verified {} saved QR codes without changing the keyring",
+            accounts.len()
+        );
+    }
 }

@@ -8,6 +8,7 @@ Application Linux de bureau pour les codes TOTP. Cliquez sur un service dans le 
 - **Importer une image** : ouvrez une image contenant un QR TOTP ou un QR d'export Google Authenticator. Si Google affiche plusieurs QR, importez-les successivement.
 - **Scanner avec la caméra** : présentez le QR devant une webcam. L'import par image reste disponible si aucune caméra n'est détectée.
 - **QR** : affichez le QR d'un compte pour le scanner sur un téléphone.
+- **Réimporter sur le téléphone** : parcourez tous les comptes, scannez chaque QR avec le téléphone et vérifiez son apparition avant de passer au suivant. Cette action ne modifie aucun compte enregistré.
 - Fermez la fenêtre pour laisser l'application dans la zone de notification ; choisissez **Quitter** dans son menu pour l'arrêter.
 
 Les comptes sont conservés dans le coffre de secrets de la session Linux via Secret Service. Le dépôt et le répertoire de l'application ne contiennent aucune clé. Un QR affiché ou une image d'import révèle toutefois la clé à quiconque peut le voir ou accéder au fichier.

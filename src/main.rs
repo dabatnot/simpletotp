@@ -7,7 +7,12 @@ use gtk::{gdk, gio, glib};
 use gtk4 as gtk;
 use ksni::{MenuItem, Tray, blocking::TrayMethods, menu::StandardItem};
 use otp::{Account, ImportResult, ImportSession};
-use std::{cell::RefCell, rc::Rc, sync::mpsc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    sync::mpsc,
+    time::Duration,
+};
 use uuid::Uuid;
 
 enum Action {
@@ -228,12 +233,8 @@ fn add(ui: &State) {
     window.present();
 }
 
-fn show_qr(ui: &State, id: Uuid) {
-    let account = ui.borrow().accounts.iter().find(|a| a.id == id).cloned();
-    let Some(account) = account else {
-        return;
-    };
-    let texture = account.qr_png().and_then(|png| {
+fn qr_texture(account: &Account) -> anyhow::Result<gdk::Texture> {
+    account.qr_png().and_then(|png| {
         let loader = gtk::gdk_pixbuf::PixbufLoader::new();
         loader.write(&png)?;
         loader.close()?;
@@ -241,8 +242,15 @@ fn show_qr(ui: &State, id: Uuid) {
             .pixbuf()
             .ok_or_else(|| anyhow::anyhow!("Image QR illisible"))?;
         Ok(gdk::Texture::for_pixbuf(&pixbuf))
-    });
-    match texture {
+    })
+}
+
+fn show_qr(ui: &State, id: Uuid) {
+    let account = ui.borrow().accounts.iter().find(|a| a.id == id).cloned();
+    let Some(account) = account else {
+        return;
+    };
+    match qr_texture(&account) {
         Ok(texture) => {
             let parent = ui.borrow().window.clone();
             let window = gtk::Window::builder()
@@ -265,6 +273,87 @@ fn show_qr(ui: &State, id: Uuid) {
         }
         Err(err) => message(ui, format!("QR indisponible : {err}")),
     }
+}
+
+fn transfer_all(ui: &State) {
+    let accounts = ui.borrow().accounts.clone();
+    if accounts.is_empty() {
+        message(ui, "Aucun compte à transférer.");
+        return;
+    }
+    let parent = ui.borrow().window.clone();
+    let window = gtk::Window::builder()
+        .title("Réimporter sur le téléphone")
+        .transient_for(&parent)
+        .modal(true)
+        .default_width(420)
+        .build();
+    let box_ = column();
+    let progress = gtk::Label::new(None);
+    progress.set_wrap(true);
+    let picture = gtk::Picture::new();
+    picture.set_size_request(320, 320);
+    picture.set_content_fit(gtk::ContentFit::Contain);
+    let instruction = gtk::Label::new(Some(
+        "Scannez ce QR avec votre téléphone. Vérifiez que le compte apparaît, puis passez au suivant.",
+    ));
+    instruction.set_wrap(true);
+    let error = gtk::Label::new(None);
+    error.set_wrap(true);
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let previous = gtk::Button::with_label("Précédent");
+    let next = gtk::Button::with_label("Suivant");
+    let close = gtk::Button::with_label("Fermer");
+    buttons.append(&previous);
+    buttons.append(&next);
+    buttons.append(&close);
+    box_.append(&progress);
+    box_.append(&picture);
+    box_.append(&instruction);
+    box_.append(&error);
+    box_.append(&buttons);
+    window.set_child(Some(&box_));
+
+    let current = Rc::new(Cell::new(0usize));
+    let previous_for_render = previous.clone();
+    let next_for_render = next.clone();
+    let render = Rc::new(move |index: usize| {
+        progress.set_text(&format!(
+            "{} / {} · {}",
+            index + 1,
+            accounts.len(),
+            accounts[index].label
+        ));
+        previous_for_render.set_sensitive(index > 0);
+        next_for_render.set_sensitive(index + 1 < accounts.len());
+        match qr_texture(&accounts[index]) {
+            Ok(texture) => {
+                picture.set_paintable(Some(&texture));
+                error.set_text("");
+            }
+            Err(err) => {
+                picture.set_paintable(None::<&gdk::Texture>);
+                error.set_text(&format!("QR indisponible : {err}"));
+            }
+        }
+    });
+    render(0);
+    let index = current.clone();
+    let update = render.clone();
+    previous.connect_clicked(move |_| {
+        let value = index.get() - 1;
+        index.set(value);
+        update(value);
+    });
+    let index = current.clone();
+    next.connect_clicked(move |_| {
+        let value = index.get() + 1;
+        index.set(value);
+        render(value);
+    });
+    let dismiss = window.clone();
+    close.connect_clicked(move |_| dismiss.close());
+    window.present();
 }
 
 fn rename(ui: &State, id: Uuid) {
@@ -423,9 +512,11 @@ fn build(app: &gtk::Application, hidden: bool, hold: gio::ApplicationHoldGuard) 
     let add_button = gtk::Button::with_label("Ajouter");
     let image_button = gtk::Button::with_label("Importer une image");
     let camera_button = gtk::Button::with_label("Scanner avec la caméra");
+    let transfer_button = gtk::Button::with_label("Réimporter sur le téléphone");
     actions.append(&add_button);
     actions.append(&image_button);
     actions.append(&camera_button);
+    actions.append(&transfer_button);
     root.append(&actions);
     let list = gtk::ListBox::new();
     list.add_css_class("boxed-list");
@@ -472,6 +563,8 @@ fn build(app: &gtk::Application, hidden: bool, hold: gio::ApplicationHoldGuard) 
     image_button.connect_clicked(move |_| import_image(&target));
     let target = ui.clone();
     camera_button.connect_clicked(move |_| camera::scan(&target, import_text, message));
+    let target = ui.clone();
+    transfer_button.connect_clicked(move |_| transfer_all(&target));
     window.connect_close_request(|window| {
         window.set_visible(false);
         glib::Propagation::Stop
